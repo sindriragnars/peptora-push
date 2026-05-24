@@ -1,0 +1,23 @@
+{
+	"name": "peptora-push",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Web Push backend for Peptora WebApp (app.peptora.app). VAPID-signed push delivery for dose reminders + news article notifications.",
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"dev": "vercel dev",
+		"deploy": "vercel --prod"
+	},
+	"dependencies": {
+		"@upstash/redis": "^1.34.3",
+		"web-push": "^3.6.7"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.2",
+		"@types/web-push": "^3.6.4",
+		"@vercel/node": "^5.0.0",
+		"typescript": "^5.7.2"
+	}
+}
