@@ -9,11 +9,20 @@ let _redis: Redis | null = null;
 
 export function redis(): Redis {
 	if (_redis) return _redis;
-	const url = process.env.UPSTASH_REDIS_REST_URL;
-	const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+	// Vercel marketplace integration injects Upstash creds with a
+	// prefix that we set when connecting the store ('a_' in our case).
+	// Fall back to standard Upstash names for local-dev convenience.
+	const url =
+		process.env.a_KV_REST_API_URL ||
+		process.env.KV_REST_API_URL ||
+		process.env.UPSTASH_REDIS_REST_URL;
+	const token =
+		process.env.a_KV_REST_API_TOKEN ||
+		process.env.KV_REST_API_TOKEN ||
+		process.env.UPSTASH_REDIS_REST_TOKEN;
 	if (!url || !token) {
 		throw new Error(
-			'Upstash Redis env vars missing — set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN.'
+			'Upstash Redis env vars missing — expected a_KV_REST_API_URL + a_KV_REST_API_TOKEN.'
 		);
 	}
 	_redis = new Redis({ url, token });
