@@ -53,63 +53,83 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 	}
 	const reminders = body.reminders.filter(isValidReminder);
 
-	const r = redis();
-	// Sanity-check the subscription exists. Stops orphan reminders
-	// piling up in Redis after an unsubscribe.
-	const subRaw = await r.get(SUB_KEY(id));
-	if (!subRaw) {
-		res.status(404).json({ error: 'subscription_not_found' });
-		return;
-	}
-
-	// Tear down old schedules. Best-effort — QStash errors don't
-	// block the new ones from being created.
-	const oldScheduleIdsRaw = await r.get<string | null>(SCHEDULES_KEY(id));
-	const oldScheduleIds: string[] = Array.isArray(oldScheduleIdsRaw)
-		? oldScheduleIdsRaw
-		: typeof oldScheduleIdsRaw === 'string'
-			? JSON.parse(oldScheduleIdsRaw)
-			: [];
-	const q = qstash();
-	await Promise.all(
-		oldScheduleIds.map((sid) =>
-			q.schedules.delete(sid).catch((e) => {
-				console.warn('qstash delete failed', sid, e?.message);
-			})
-		)
-	);
-
-	// Persist new reminder list + create new schedules.
-	await r.set(REMINDERS_KEY(id), JSON.stringify(reminders));
-
-	const newScheduleIds: string[] = [];
-	const tickUrl = `${baseUrl(req)}/api/reminder-tick`;
-	for (const rem of reminders) {
-		// `rem.time` was already validated as /^\d{2}:\d{2}$/ in
-		// isValidReminder, so this split + parse is safe.
-		const [hh = '0', mm = '0'] = rem.time.split(':');
-		const dow = rem.days.length === 7 ? '*' : rem.days.join(',');
-		const cron = `${parseInt(mm, 10)} ${parseInt(hh, 10)} * * ${dow}`;
-		try {
-			const result = await q.schedules.create({
-				destination: tickUrl,
-				cron,
-				body: JSON.stringify({ subId: id, reminderId: rem.id }),
-				headers: { 'Content-Type': 'application/json' }
-			});
-			newScheduleIds.push(result.scheduleId);
-		} catch (e) {
-			const msg = (e as Error).message;
-			console.error('qstash schedule create failed', { rem, cron, msg });
+	// Everything past here can throw (Redis, QStash). Wrap so a thrown
+	// error still goes through res.json() — Vercel's default 500 path
+	// drops the CORS headers handleCors set above, which surfaces in
+	// the browser as an opaque "Failed to fetch" with no diagnostic.
+	try {
+		const r = redis();
+		// Sanity-check the subscription exists. Stops orphan reminders
+		// piling up in Redis after an unsubscribe.
+		const subRaw = await r.get(SUB_KEY(id));
+		if (!subRaw) {
+			res.status(404).json({ error: 'subscription_not_found' });
+			return;
 		}
-	}
-	await r.set(SCHEDULES_KEY(id), JSON.stringify(newScheduleIds));
 
-	res.status(200).json({
-		stored: reminders.length,
-		scheduled: newScheduleIds.length,
-		removedOld: oldScheduleIds.length
-	});
+		// Tear down old schedules. Best-effort — QStash errors don't
+		// block the new ones from being created.
+		const oldScheduleIdsRaw = await r.get<string | null>(SCHEDULES_KEY(id));
+		const oldScheduleIds: string[] = Array.isArray(oldScheduleIdsRaw)
+			? oldScheduleIdsRaw
+			: typeof oldScheduleIdsRaw === 'string'
+				? JSON.parse(oldScheduleIdsRaw)
+				: [];
+
+		// Lazy QStash client init — skip entirely when there's nothing
+		// to schedule or unschedule. Avoids hard-failing the request
+		// just because QSTASH_TOKEN happens to be missing on a no-op.
+		const needsQStash = oldScheduleIds.length > 0 || reminders.length > 0;
+		const q = needsQStash ? qstash() : null;
+
+		if (q) {
+			await Promise.all(
+				oldScheduleIds.map((sid) =>
+					q.schedules.delete(sid).catch((e) => {
+						console.warn('qstash delete failed', sid, e?.message);
+					})
+				)
+			);
+		}
+
+		// Persist new reminder list + create new schedules.
+		await r.set(REMINDERS_KEY(id), JSON.stringify(reminders));
+
+		const newScheduleIds: string[] = [];
+		const tickUrl = `${baseUrl(req)}/api/reminder-tick`;
+		if (q) {
+			for (const rem of reminders) {
+				// `rem.time` was already validated as /^\d{2}:\d{2}$/ in
+				// isValidReminder, so this split + parse is safe.
+				const [hh = '0', mm = '0'] = rem.time.split(':');
+				const dow = rem.days.length === 7 ? '*' : rem.days.join(',');
+				const cron = `${parseInt(mm, 10)} ${parseInt(hh, 10)} * * ${dow}`;
+				try {
+					const result = await q.schedules.create({
+						destination: tickUrl,
+						cron,
+						body: JSON.stringify({ subId: id, reminderId: rem.id }),
+						headers: { 'Content-Type': 'application/json' }
+					});
+					newScheduleIds.push(result.scheduleId);
+				} catch (e) {
+					const msg = (e as Error).message;
+					console.error('qstash schedule create failed', { rem, cron, msg });
+				}
+			}
+		}
+		await r.set(SCHEDULES_KEY(id), JSON.stringify(newScheduleIds));
+
+		res.status(200).json({
+			stored: reminders.length,
+			scheduled: newScheduleIds.length,
+			removedOld: oldScheduleIds.length
+		});
+	} catch (e) {
+		const msg = (e as Error).message ?? String(e);
+		console.error('sync-reminders failed', msg);
+		res.status(500).json({ error: 'internal', message: msg });
+	}
 }
 
 function isValidReminder(x: unknown): x is SyncedReminder {
