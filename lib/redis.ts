@@ -33,6 +33,23 @@ export function redis(): Redis {
  * ---------------------
  *  sub:{id}         → PushSubscription JSON (set on subscribe)
  *  subs             → set of all active subscription IDs (for fan-out)
+ *  reminders:{id}   → JSON array of SyncedReminder (set on sync-reminders)
+ *  schedules:{id}   → JSON array of QStash schedule IDs owned by sub
+ *  news:last_slugs  → JSON array of last-seen blog manifest slugs (Phase C)
  */
 export const SUB_KEY = (id: string) => `sub:${id}`;
 export const SUBS_SET = 'subs';
+export const REMINDERS_KEY = (id: string) => `reminders:${id}`;
+export const SCHEDULES_KEY = (id: string) => `schedules:${id}`;
+
+export interface SyncedReminder {
+	/** Local reminder id from the webapp (Dexie auto-increment). */
+	id: number;
+	peptideId: string;
+	peptideName: string;
+	dose: string;
+	/** "HH:MM" 24-hour. */
+	time: string;
+	/** Days of week, 0 = Sun … 6 = Sat. */
+	days: number[];
+}
