@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { isAuthorizedInternal } from '../lib/auth.js';
+import { handleCors } from '../lib/cors.js';
 import { sendPush, type PushPayload, type PushSubscriptionJSON } from '../lib/push.js';
 import { redis, SUBS_SET, SUB_KEY } from '../lib/redis.js';
 
@@ -16,7 +17,11 @@ import { redis, SUBS_SET, SUB_KEY } from '../lib/redis.js';
  * Never exposed to the browser — only worker-internal callers.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-	// Note: no CORS — this endpoint is server-to-server only.
+	// CORS is allowed so the WebApp can fire a test push from
+	// DevTools without a curl round-trip. Auth still gates the
+	// endpoint — anyone without the Bearer secret gets a 401, so the
+	// CORS surface doesn't lower security.
+	if (handleCors(req, res)) return;
 	if (req.method !== 'POST') {
 		res.status(405).json({ error: 'method_not_allowed' });
 		return;
