@@ -4,5 +4,11 @@
 		"api/*.ts": {
 			"runtime": "@vercel/node@5.0.0"
 		}
-	}
+	},
+	"crons": [
+		{
+			"path": "/api/news-tick",
+			"schedule": "0 7 * * *"
+		}
+	]
 }

@@ -41,6 +41,7 @@ export const SUB_KEY = (id: string) => `sub:${id}`;
 export const SUBS_SET = 'subs';
 export const REMINDERS_KEY = (id: string) => `reminders:${id}`;
 export const SCHEDULES_KEY = (id: string) => `schedules:${id}`;
+export const NEWS_SEEN_KEY = 'news:last_slugs';
 
 export interface SyncedReminder {
 	/** Local reminder id from the webapp (Dexie auto-increment). */
