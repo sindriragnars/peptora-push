@@ -3,24 +3,18 @@ import { sendPush, type PushSubscriptionJSON } from '../lib/push.js';
 import { redis, NEWS_SEEN_KEY, SUBS_SET, SUB_KEY } from '../lib/redis.js';
 
 /**
- * Daily news polling cron (v0.5 Phase C). Vercel hits this once a
- * day at 07:00 UTC (configured in vercel.json). Flow:
+ * Daily news polling. The in-container scheduler (server.ts) calls pollNews()
+ * once a day; this HTTP handler stays as a manual trigger (curl with the
+ * CRON_SECRET bearer). Flow:
  *
- *  1. Fetch the WebApp's blog manifest at peptora.app/api/blog.json
+ *  1. Fetch the marketing site's blog manifest
  *  2. Compare slugs against `news:last_slugs` in Redis
- *  3. For each new slug → fan out one push per subscription with the
- *     article's title/description and a deep link to the blog post
+ *  3. For each new slug → fan out one push per subscription
  *  4. Persist the updated slug set
  *
- * First-run bootstrap: when `news:last_slugs` is empty (fresh Redis,
- * first deploy after Phase C lands), we mark every current slug as
- * seen WITHOUT pushing — otherwise the launch would dump every old
- * article as a notification onto every user at once.
- *
- * Auth: Vercel automatically attaches `Authorization: Bearer
- * <CRON_SECRET>` to scheduled invocations when CRON_SECRET is set
- * on the project. We reject anything else, so randos can't trigger
- * a re-fanout by curling the endpoint.
+ * First-run bootstrap: when `news:last_slugs` is empty we mark every current
+ * slug as seen WITHOUT pushing — otherwise launch would dump every old
+ * article onto every user at once.
  */
 
 const BLOG_MANIFEST_URL = 'https://www.peptora.app/api/blog.json';
@@ -40,7 +34,6 @@ interface BlogManifest {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
 	if (req.method !== 'POST' && req.method !== 'GET') {
-		// Vercel cron uses GET; manual triggers from curl can use either.
 		res.status(405).json({ error: 'method_not_allowed' });
 		return;
 	}
@@ -48,99 +41,100 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 		res.status(401).json({ error: 'unauthorized' });
 		return;
 	}
-
 	try {
-		const manifest = await fetchManifest();
-		const currentSlugs = manifest.articles.map((a) => a.slug);
-
-		const r = redis();
-		const seenRaw = await r.get<string | string[] | null>(NEWS_SEEN_KEY);
-		const seen: string[] = Array.isArray(seenRaw)
-			? seenRaw
-			: typeof seenRaw === 'string'
-				? JSON.parse(seenRaw)
-				: [];
-
-		// Bootstrap: nothing seen yet → mark all as seen, send nothing.
-		if (seen.length === 0) {
-			await r.set(NEWS_SEEN_KEY, JSON.stringify(currentSlugs));
-			res.status(200).json({ bootstrapped: currentSlugs.length });
-			return;
-		}
-
-		const seenSet = new Set(seen);
-		const newArticles = manifest.articles.filter((a) => !seenSet.has(a.slug));
-
-		if (newArticles.length === 0) {
-			res.status(200).json({ checked: currentSlugs.length, newArticles: 0 });
-			return;
-		}
-
-		// Fetch the full subscription list once. We re-use it across all
-		// new articles so we don't re-query Redis per article.
-		const subIds = await r.smembers(SUBS_SET);
-		let totalSent = 0;
-		let totalEvicted = 0;
-		let totalFailed = 0;
-
-		for (const article of newArticles) {
-			const payload = {
-				title: article.title_is || article.title,
-				body: article.description_is || article.description || '',
-				url: article.url,
-				tag: `news-${article.slug}`,
-				icon: '/icon.png'
-			};
-			for (const id of subIds) {
-				const raw = await r.get<string>(SUB_KEY(id));
-				if (!raw) {
-					await r.srem(SUBS_SET, id);
-					continue;
-				}
-				let sub: PushSubscriptionJSON;
-				try {
-					sub = typeof raw === 'string' ? JSON.parse(raw) : (raw as PushSubscriptionJSON);
-				} catch {
-					await r.del(SUB_KEY(id));
-					await r.srem(SUBS_SET, id);
-					continue;
-				}
-				const result = await sendPush(sub, payload);
-				if (result.ok) {
-					totalSent++;
-				} else if (result.gone) {
-					await r.del(SUB_KEY(id));
-					await r.srem(SUBS_SET, id);
-					totalEvicted++;
-				} else {
-					totalFailed++;
-					console.warn('news push failed', {
-						subId: id,
-						slug: article.slug,
-						statusCode: result.statusCode,
-						error: result.error
-					});
-				}
-			}
-		}
-
-		// Update seen set last — if pushes failed mid-loop we still want
-		// to mark these slugs as seen, otherwise the next run would re-
-		// fanout every article to the same subs and spam everyone.
-		await r.set(NEWS_SEEN_KEY, JSON.stringify(currentSlugs));
-
-		res.status(200).json({
-			checked: currentSlugs.length,
-			newArticles: newArticles.length,
-			sent: totalSent,
-			evicted: totalEvicted,
-			failed: totalFailed
-		});
+		res.status(200).json(await pollNews());
 	} catch (e) {
 		const msg = (e as Error).message ?? String(e);
 		console.error('news-tick failed', msg);
 		res.status(500).json({ error: 'internal', message: msg });
 	}
+}
+
+/**
+ * Poll the manifest and push one notification per newly-seen article. Shared
+ * by the HTTP handler and the daily in-container scheduler. Returns a summary.
+ */
+export async function pollNews(): Promise<Record<string, number>> {
+	const manifest = await fetchManifest();
+	const currentSlugs = manifest.articles.map((a) => a.slug);
+
+	const r = redis();
+	const seenRaw = await r.get<string | string[] | null>(NEWS_SEEN_KEY);
+	const seen: string[] = Array.isArray(seenRaw)
+		? seenRaw
+		: typeof seenRaw === 'string'
+			? JSON.parse(seenRaw)
+			: [];
+
+	// Bootstrap: nothing seen yet → mark all as seen, send nothing.
+	if (seen.length === 0) {
+		await r.set(NEWS_SEEN_KEY, JSON.stringify(currentSlugs));
+		return { bootstrapped: currentSlugs.length };
+	}
+
+	const seenSet = new Set(seen);
+	const newArticles = manifest.articles.filter((a) => !seenSet.has(a.slug));
+	if (newArticles.length === 0) {
+		return { checked: currentSlugs.length, newArticles: 0 };
+	}
+
+	const subIds = await r.smembers(SUBS_SET);
+	let totalSent = 0;
+	let totalEvicted = 0;
+	let totalFailed = 0;
+
+	for (const article of newArticles) {
+		const payload = {
+			title: article.title_is || article.title,
+			body: article.description_is || article.description || '',
+			url: article.url,
+			tag: `news-${article.slug}`,
+			icon: '/icon.png'
+		};
+		for (const id of subIds) {
+			const raw = await r.get<string>(SUB_KEY(id));
+			if (!raw) {
+				await r.srem(SUBS_SET, id);
+				continue;
+			}
+			let sub: PushSubscriptionJSON;
+			try {
+				sub = typeof raw === 'string' ? JSON.parse(raw) : (raw as PushSubscriptionJSON);
+			} catch {
+				await r.del(SUB_KEY(id));
+				await r.srem(SUBS_SET, id);
+				continue;
+			}
+			const result = await sendPush(sub, payload);
+			if (result.ok) {
+				totalSent++;
+			} else if (result.gone) {
+				await r.del(SUB_KEY(id));
+				await r.srem(SUBS_SET, id);
+				totalEvicted++;
+			} else {
+				totalFailed++;
+				console.warn('news push failed', {
+					subId: id,
+					slug: article.slug,
+					statusCode: result.statusCode,
+					error: result.error
+				});
+			}
+		}
+	}
+
+	// Update seen set last — even if pushes failed we mark these slugs seen,
+	// otherwise the next run would re-fanout every article and spam everyone.
+	await r.set(NEWS_SEEN_KEY, JSON.stringify(currentSlugs));
+
+	return {
+		checked: currentSlugs.length,
+		newArticles: newArticles.length,
+		sent: totalSent,
+		evicted: totalEvicted,
+		failed: totalFailed
+	};
 }
 
 function isAuthorizedCron(req: VercelRequest): boolean {

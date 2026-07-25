@@ -13,20 +13,22 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import newsTick from './api/news-tick.js';
 import push from './api/push.js';
-import reminderTick from './api/reminder-tick.js';
 import subscribe from './api/subscribe.js';
 import syncReminders from './api/sync-reminders.js';
 import unsubscribe from './api/unsubscribe.js';
+import { startScheduler } from './lib/scheduler.js';
 
 type Handler = (req: VercelRequest, res: VercelResponse) => void | Promise<void>;
 
+// Reminder firing moved from a QStash webhook (/api/reminder-tick) to the
+// in-container scheduler below — there's no per-reminder external schedule
+// anymore, so that route is gone.
 const ROUTES: Record<string, { handler: Handler; rawBody?: boolean }> = {
 	'/api/subscribe': { handler: subscribe },
 	'/api/unsubscribe': { handler: unsubscribe },
 	'/api/sync-reminders': { handler: syncReminders },
 	'/api/push': { handler: push },
-	'/api/news-tick': { handler: newsTick },
-	'/api/reminder-tick': { handler: reminderTick, rawBody: true }
+	'/api/news-tick': { handler: newsTick }
 };
 
 function vercelify(res: ServerResponse): VercelResponse {
@@ -95,4 +97,5 @@ const server = createServer(async (req, res) => {
 const port = parseInt(process.env.PORT ?? '3000', 10);
 server.listen(port, () => {
 	console.log(`peptora-push listening on :${port}`);
+	startScheduler();
 });

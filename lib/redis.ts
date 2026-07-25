@@ -1,32 +1,49 @@
-import { Redis } from '@upstash/redis';
+import { Redis } from 'ioredis';
 
 /**
- * Lazy Upstash Redis client. Constructed on first use so module
- * import doesn't fail in environments missing env vars (CI, local
- * dev without secrets loaded).
+ * Lazy Redis client. Self-hosted Redis on the icelandvision VPS (Coolify),
+ * reached over the internal Docker network via REDIS_URL. Was Upstash's REST
+ * client; now a thin wrapper over ioredis that keeps the same method surface
+ * (get/set/smembers/sadd/srem/del) so the call sites are unchanged.
+ *
+ * `get<T>()` returns the raw string cast to T — every caller already does
+ * `typeof raw === 'string' ? JSON.parse(raw) : raw`, so string values pass
+ * straight through and the old Upstash generic signatures still type-check.
  */
-let _redis: Redis | null = null;
-
-export function redis(): Redis {
-	if (_redis) return _redis;
-	// Vercel marketplace integration injects Upstash creds with a
-	// prefix that we set when connecting the store ('a_' in our case).
-	// Fall back to standard Upstash names for local-dev convenience.
-	const url =
-		process.env.a_KV_REST_API_URL ||
-		process.env.KV_REST_API_URL ||
-		process.env.UPSTASH_REDIS_REST_URL;
-	const token =
-		process.env.a_KV_REST_API_TOKEN ||
-		process.env.KV_REST_API_TOKEN ||
-		process.env.UPSTASH_REDIS_REST_TOKEN;
-	if (!url || !token) {
-		throw new Error(
-			'Upstash Redis env vars missing — expected a_KV_REST_API_URL + a_KV_REST_API_TOKEN.'
-		);
+class RedisClient {
+	constructor(private readonly c: Redis) {}
+	async get<T = string>(key: string): Promise<T | null> {
+		const v = await this.c.get(key);
+		return (v as unknown as T) ?? null;
 	}
-	_redis = new Redis({ url, token });
-	return _redis;
+	set(key: string, value: string) {
+		return this.c.set(key, value);
+	}
+	smembers(key: string) {
+		return this.c.smembers(key);
+	}
+	sadd(key: string, member: string) {
+		return this.c.sadd(key, member);
+	}
+	srem(key: string, member: string) {
+		return this.c.srem(key, member);
+	}
+	del(key: string) {
+		return this.c.del(key);
+	}
+}
+
+let _client: RedisClient | null = null;
+let _raw: Redis | null = null;
+
+export function redis(): RedisClient {
+	if (_client) return _client;
+	const url = process.env.REDIS_URL;
+	if (!url) throw new Error('REDIS_URL missing — set the internal redis:// URL.');
+	_raw = new Redis(url, { maxRetriesPerRequest: 3 });
+	_raw.on('error', (e) => console.error('redis error', e.message));
+	_client = new RedisClient(_raw);
+	return _client;
 }
 
 /* Redis keyspace layout
@@ -34,13 +51,14 @@ export function redis(): Redis {
  *  sub:{id}         → PushSubscription JSON (set on subscribe)
  *  subs             → set of all active subscription IDs (for fan-out)
  *  reminders:{id}   → JSON array of SyncedReminder (set on sync-reminders)
- *  schedules:{id}   → JSON array of QStash schedule IDs owned by sub
- *  news:last_slugs  → JSON array of last-seen blog manifest slugs (Phase C)
+ *  news:last_slugs  → JSON array of last-seen blog manifest slugs
+ *
+ * (schedules:{id} is gone — reminder firing is now an in-container cron,
+ *  not per-reminder QStash schedules.)
  */
 export const SUB_KEY = (id: string) => `sub:${id}`;
 export const SUBS_SET = 'subs';
 export const REMINDERS_KEY = (id: string) => `reminders:${id}`;
-export const SCHEDULES_KEY = (id: string) => `schedules:${id}`;
 export const NEWS_SEEN_KEY = 'news:last_slugs';
 
 export interface SyncedReminder {
