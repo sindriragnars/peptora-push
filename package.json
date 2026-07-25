@@ -1,14 +1,15 @@
 {
 	"name": "peptora-push",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
-	"description": "Web Push backend for Peptora WebApp (app.peptora.app). VAPID-signed push delivery for dose reminders + news article notifications.",
+	"type": "module",
+	"description": "Web Push backend for Peptora WebApp (app.peptora.app). VAPID-signed push delivery for dose reminders + news article notifications. Runs as a node container on Coolify (push.peptora.app).",
 	"engines": {
 		"node": ">=20"
 	},
 	"scripts": {
-		"dev": "vercel dev",
-		"deploy": "vercel --prod"
+		"build": "tsc",
+		"start": "node dist/server.js"
 	},
 	"dependencies": {
 		"@upstash/qstash": "^2.11.0",
